@@ -4,12 +4,27 @@
 **/
 
 // Setup
-var setup = function() {
-    createCanvas(600, 600);
+var slider, data, best, freeze;
+function setup() {
+    createCanvas(windowWidth, 600);
     angleMode(DEGREES);
     sprites.load();
     frameRate(Infinity);
+    slider = document.getElementById("slider");
+    data = document.getElementById("data");
+    best = document.getElementById("best");
+    freeze = document.getElementById("freeze");
+    for(var i = 0; i < sampleSize; i ++) {
+        birds.push(new Bird());
+    }
+    pipes = [];
+    new Pipe();
+    new Pipe();
+    pipesPassed = 0;
 };
+function windowResized() {
+    resizeCanvas(windowWidth, 600);
+}
 
 // Sprites
 var sprites = {
@@ -19,27 +34,25 @@ var sprites = {
 
 	load: function() {
 		for(var key in this) {
-			if(key === "load") {
-				continue;
-			}
-			// this[key] = loadImage(this[key]);
-            clear();
-            rect(0, 0, 10, 10);
-            this[key] = get(0, 0, 10, 10);
+			if(key === "load") continue;
+			this[key] = loadImage(this[key]);
+            // clear();
+            // rect(0, 0, 10, 10);
+            // this[key] = get(0, 0, 10, 10);
 		}
 	}
-
-}
+};
 
 // Neural Network Settings
 var sampleSize = 500;
-var easeOfLife = 1;
+var live = 10;
 var change = 0.1;
 
 // Pipe Settings
-var gap = 100;
+var gap = 150;
+var pipeDist = 100;
 var pipeSpeed = 3;
-var pipeWidth = 50;
+var pipeWidth = 100;
 var pipeAppear = 100;
 
 // Other Settings
@@ -47,19 +60,10 @@ var gravity = 0.5;
 var ground = 550;
 
 // Globals
-var pipeSpawn = 0;
+var pipesPassed = 0;
 var passedFirst = false;
 var genNo = 1;
-var successBird;
-
-// Copy Object
-var copyObject = function(o) {
-	var a = {};
-	for(var i in o) {
-		a[i] = o[i];
-	}
-	return a;
-};
+var offset = pipeDist + pipeWidth / 2;
 
 // Rect Rect Intersection
 var intersectRectRect = function(x, y, w, h, x2, y2, w2, h2) {
@@ -67,170 +71,306 @@ var intersectRectRect = function(x, y, w, h, x2, y2, w2, h2) {
 };
 
 // Pipe
+function hashCode(str) {
+    let hash = 0;
+    for (let i = 0, len = str.length; i < len; i++) {
+        let chr = str.charCodeAt(i);
+        hash = (hash << 5) - hash + chr;
+        hash |= 0; // Convert to 32bit integer
+    }
+    return hash;
+}
 var pipes = [];
-var Pipe = function() {
-    this.x = width;
-    this.y = random(150, height - gap - 150);
+class Pipe {
+    constructor() {
+        if(pipes.length) {
+            this.x = pipes[pipes.length - 1].x + pipeWidth + pipeDist;
+            if(pipes.length > 1) {
+                var last = pipes[pipes.length - 1].y > pipes[pipes.length - 2].y;
+                this.y = last && random() > 0.25 ? random(constrain(pipes[pipes.length - 1].y - gap, 0, ground - gap), constrain(pipes[pipes.length - 1].y, 0, ground - gap)) : random(constrain(pipes[pipes.length - 1].y, 0, ground - gap), constrain(pipes[pipes.length - 1].y + gap, 0, ground - gap));
+            }
+            else this.y = random(constrain(pipes[pipes.length - 1].y - gap, 0, ground - gap), constrain(pipes[pipes.length - 1].y + gap, 0, ground - gap));
+        }
+        else {
+            this.x = 600;
+            this.y = random(0, ground - gap);
+        }
+        this.y = constrain(this.y, 0, ground - gap)
+        pipes.push(this);
+    }
+    draw() {
+        fill(0, 255, 0);
+        push();
+        translate(this.x + pipeWidth / 2, this.y / 2);
+        scale(1, -1);
+        image(sprites.pipe, -pipeWidth / 2, -this.y / 2, pipeWidth, sprites.pipe.height * pipeWidth / sprites.pipe.width);
+        pop();
+        image(sprites.pipe, this.x, this.y + gap, pipeWidth, sprites.pipe.height * pipeWidth / sprites.pipe.width);
+    }
+    do() {
+        this.x -= pipeSpeed;
+    }
 };
-Pipe.prototype.do = function() {
-    fill(0, 255, 0);
-    push();
-    translate(this.x + pipeWidth / 2, this.y / 2);
-    scale(1, -1);
-    image(sprites.pipe, -pipeWidth / 2, -this.y / 2);
-    pop();
-    image(sprites.pipe, this.x, this.y + gap);
-    this.x -= pipeSpeed;
-};
+
+// Layers
+class Linear {
+    constructor(inputs, outputs) {
+        this.inputs = inputs;
+        this.outputs = outputs;
+        this.weights = [];
+        this.biases = [];
+        for(var i = 0; i < inputs; i += 1) {
+            var node = [];
+            for(var j = 0; j < outputs; j += 1) {
+                node.push(randomGaussian(0, 2 / sqrt(inputs + outputs)));
+            }
+            this.weights.push(node);
+            this.biases.push(0);
+        }
+    }
+    copy(layer) {
+        for(var i = 0; i < this.inputs; i += 1) {
+            this.weights[i] = [...layer.weights[i]];
+            this.biases[i] = layer.biases[i];
+        }
+    }
+    mutate(change) {
+        for(var i = 0; i < this.inputs; i += 1) {
+            for(var j = 0; j < this.outputs; j += 1) {
+                this.weights[i][j] += randomGaussian(0, change / sqrt(this.inputs + this.outputs));
+            }
+            this.biases[i] += randomGaussian(0, change / sqrt(this.inputs + this.outputs));
+        }
+    }
+    forward(input) {
+        var output = [];
+        for(var i = 0; i < this.outputs; i += 1) {
+            var out = 0;
+            for(var j = 0; j < this.inputs; j += 1) {
+                out += input[j] * this.weights[j][i] + this.biases[j];
+            }
+            output.push(out);
+        }
+        return output;
+    }
+}
+
+class Tanh {
+    constructor() { }
+    forward(input) {
+        return input.map(Math.tanh);
+    }
+}
+
+class RelU {
+    constructor() { }
+    forward(input) {
+        return input.map(a => a > 0 ? a : 0);
+    }
+}
 
 // Bird
 var birds = [];
-var Bird = function() {
-    this.x = 0;
-    this.y = 290;
-    this.width = 48;
-    this.height = 30;
+var bestBirds = [];
+class Bird {
+    constructor() {
+        this.x = 0;
+        this.y = 290;
+        this.width = 48;
+        this.height = 30;
 
-    this.velocityY = 0;
+        this.yVel = 0;
 
-    this.nodes = [];
-    this.inputs = {
-    	xDist: [550, random(-1 / 50, 1 / 50)],
-    	velocityY: [0, random(-1 / 7, 1 / 7)],
-    	yDistTop: [30, random(-1 / 375, 1 / 375)],
-    	yDistBottom: [20, random(-1 / 350, 1 / 350)],
-    	pipeSpeed: [3, random(-1 / 100, 1 / 100)],
-    };
-    this.willJump = 0;
-    this.dead = false;
-    this.survivedFor = 0;
-
-    this.jump = function() {
-        this.velocityY = -7;
-    };
-    this.do = function() {
-    	this.survivedFor ++;
+        this.time = 0;
+        this.layers = [
+            new Linear(7, 7),
+            // new RelU(),
+            new Tanh(),
+            new Linear(7, 7),
+            // new RelU(),
+            new Tanh(),
+            new Linear(7, 1),
+        ];
+        this.dead = false;
+    }
+    jump() {
+        this.yVel = -7;
+    }
+    copy(bird) {
+        for(var i = 0; i < this.layers.length; i += 1) {
+            if(typeof this.layers[i].copy == "function") this.layers[i].copy(bird.layers[i]);
+        }
+    }
+    mutate(change) {
+        for(var i = 0; i < this.layers.length; i += 1) {
+            if(typeof this.layers[i].mutate == "function") this.layers[i].mutate(change);
+        }
+    }
+    draw() {
         fill(255, 255, 0);
         noStroke();
         push();
         translate(this.x + this.width / 2, this.y + this.height / 2);
-        rotate(this.velocityY * 6);
+        rotate(this.yVel * 6);
         image(sprites.bird, -this.width / 2, -this.height / 2, this.width, this.height);
         pop();
-
-        for(var i = pipes.length - 1; i >= 0; i --) {
-            if(!intersectRectRect(this.x, this.y, this.width, this.height, pipes[i].x, 0, pipeWidth, pipes[i].y) && !intersectRectRect(this.x, this.y, this.width, this.height, pipes[i].x, pipes[i].y + gap, pipeWidth, height)) {
-                continue;
-            }
-            this.dead = true;
-        }
-
-        this.velocityY += gravity;
-        this.velocityY = constrain(this.velocityY, -7, 7);
-        this.y += this.velocityY;
+    }
+    do() {
+        this.time += 0.1;
+        this.yVel += gravity;
+        this.yVel = constrain(this.yVel, -7, 7);
+        this.y += this.yVel;
         this.y = constrain(this.y, 0, height);
 
-        var nextPipe = pipes[0];
-        if(nextPipe.x < this.x - pipeWidth) {
-        	nextPipe = pipes[1];
+        var pipe1 = pipes[0], pipe2 = pipes[1];
+        if(pipe1.x < this.x - pipeWidth) {
+            pipe1 = pipes[1];
+            pipe2 = pipes[2];
         }
-        this.inputs.xDist[0] = nextPipe.x - this.x + this.width;
-        this.inputs.velocityY[0] = this.velocityY;
-        this.inputs.yDistTop[0] = abs(this.y - nextPipe.y);
-        this.inputs.yDistBottom[0] = abs(nextPipe.y + gap - this.y + this.height);
-        this.inputs.pipeSpeed[0] = pipeSpeed;
-        this.willJump = 0;
-        this.willJump += this.inputs.xDist[0] * this.inputs.xDist[1] / ((passedFirst) ? 1 : 11);
-        this.willJump += this.inputs.velocityY[0] * this.inputs.velocityY[1];
-        this.willJump += this.inputs.yDistTop[0] * this.inputs.yDistTop[1];
-        this.willJump += this.inputs.yDistBottom[0] * this.inputs.yDistBottom[1];
-        this.willJump += this.inputs.pipeSpeed[0] * this.inputs.pipeSpeed[1];
-        if(this.willJump > 0) {
-        	this.jump();
+        var tensor = [
+            map(this.x, pipe1.x - pipeDist, pipe1.x, 0, 1), // x dist to next pipe
+            map(this.x, pipe2.x - pipeDist, pipe2.x, 0, 1),
+            this.yVel / 7,
+            (pipe1.y - this.y) / 600, // y dist to top pipe
+            (pipe2.y - this.y) / 600,
+            (this.y + this.height - pipe1.y - gap) / 600, // y dist to bottom pipe
+            (this.y + this.height - pipe2.y - gap) / 600,
+        ];
+        for(var i = 0; i < this.layers.length; i += 1) {
+            tensor = this.layers[i].forward(tensor);
         }
+        if(tensor[0] > 0) this.jump();
 
-        if(this.y + this.height > ground) {
+        if(this.y + this.height > ground) this.dead = true;
+        for(var i = pipes.length - 1; i >= 0; i--) {
+            if(!intersectRectRect(this.x, this.y, this.width, this.height, pipes[i].x, 0, pipeWidth, pipes[i].y) && !intersectRectRect(this.x, this.y, this.width, this.height, pipes[i].x, pipes[i].y + gap, pipeWidth, height)) continue;
             this.dead = true;
         }
-    };
+    }
 };
 
-// Draw
-var draw = function() {
-    for(var asdf = 0; asdf < 10; asdf += 1) {
-        if(birds.length === 0) {
-            for(var i = 0; i < sampleSize; i ++) {
-                birds.push(new Bird());
-            }
-            pipes = [];
-            pipeSpawn = 0;
-        }
-        if(pipes.length === 0 || (pipes.length > 0 && pipes[pipes.length - 1].x < 300)) {
-            pipes.push(new Pipe());
-            pipeSpawn ++;
-        }
-        background(0, 230, 255);
-        for(var i = -100; i < width + 100; i += 100) {
-            image(sprites.city, i - (frameCount) % 100, 0);
-        }
+function sampleBird(birds) {
+    let totalWeight = birds.reduce((sum, bird) => sum + bird.time, 0);
+    let sample = random(totalWeight);
+    for(var bird of birds) {
+        sample -= bird.time;
+        if(sample <= 0) return bird;
+    }
+}
 
-        var alive = false;
-        for(var i = birds.length - 1; i >= 0; i --) {
-            if(birds[i].dead) {
+function run() {
+    frames += 1;
+    while(pipes[pipes.length - 1].x + pipeWidth + pipeDist < width) {
+        new Pipe();
+    }
+
+    for(var i = birds.length - 1; i >= 0; i --) {
+        if(birds[i].dead) {
+            if(birds.length > 1) {
+                birds.splice(i, 1);
+                if(birds.length <= live) break;
                 continue;
             }
-            alive = true;
-            birds[i].do();
-        }
-        if(!alive) {
-            pipeSpeed = 3;
-            pipes.length = 0;
-            pipeSpawn = 0;
-            var best = 0;
-            for(var i = 0; i < birds.length; i ++) {
-                if(birds[i].survivedFor < best) {
-                    continue;
-                }
-                best = birds[i].survivedFor;
-                successBird = {
-                    xDist: [550, birds[i].inputs.xDist[1]],
-                    velocityY: [0, birds[i].inputs.velocityY[1]],
-                    yDistTop: [30, birds[i].inputs.yDistTop[1]],
-                    yDistBottom: [20, birds[i].inputs.yDistBottom[1]],
-                    pipeSpeed: [3, birds[i].inputs.pipeSpeed[1]],
-                };
-            }
-            birds = [];
-            for(var i = 0; i < sampleSize; i ++) {
-                birds.push(new Bird());
-                var newBird = birds[birds.length - 1];
-                newBird.inputs = {
-                    xDist: [550, successBird.xDist[1]],
-                    velocityY: [0, successBird.velocityY[1]],
-                    yDistTop: [30, successBird.yDistTop[1]],
-                    yDistBottom: [20, successBird.yDistBottom[1]],
-                    pipeSpeed: [3, successBird.pipeSpeed[1]],
-                };
-                newBird.inputs.xDist[1] += random(-change, change);
-                newBird.inputs.velocityY[1] += random(-change, change);
-                newBird.inputs.yDistTop[1] += random(-change, change);
-                newBird.inputs.yDistBottom[1] += random(-change, change);
-                newBird.inputs.pipeSpeed[1] += random(-change, change);
-            }
-            genNo ++;
-        }
-        pipeSpeed += 0.01;
-        for(var i = pipes.length - 1; i >= 0; i --) {
-            pipes[i].do();
-            if(pipes[i].x < -pipeWidth) {
-                passedFirst = true;
-                pipes.splice(i, 1);
+            else {
+                allDead = true;
+                break;
             }
         }
-
-        fill(0);
-        textAlign(LEFT, TOP);
-        textSize(20);
-        text(genNo + "\n" + pipeSpawn, 0, 0);
+        birds[i].do();
     }
+    // pipeSpeed += 0.001;
+    for(var i = pipes.length - 1; i >= 0; i --) {
+        pipes[i].do();
+        if(pipes[i].x < -pipeWidth - offset) {
+            passedFirst = true;
+            pipesPassed ++;
+            pipes.splice(i, 1);
+        }
+    }
+}
+
+function reset(successBirds) {
+    frames = 0;
+    dead = false;
+    pipeSpeed = 3;
+    pipes = [];
+    new Pipe();
+    new Pipe();
+    birds = [];
+    pipesPassed = 0;
+    var newBirds = [];
+    for(var i = 0; i < successBirds.length; i += 1) {
+        var bird = new Bird();
+        var successBird = successBirds[i];
+        bird.copy(successBird);
+        newBirds.push(bird);
+    }
+    for(var i = newBirds.length; i < sampleSize; i ++) {
+        var newBird = new Bird();
+        var successBird = sampleBird(successBirds);
+        newBird.copy(successBird);
+        newBird.mutate(change);
+        newBirds.push(newBird);
+    }
+    birds = newBirds;
+    genNo ++;
+    allDead = false;
+}
+
+function display() {
+    background(0, 230, 255);
+    for(var i = -100; i < width + 100; i += 100) {
+        image(sprites.city, i - (frames) % 100, 0);
+    }
+    push();
+    translate(offset, 0);
+    for(var i = pipes.length - 1; i >= 0; i --) {
+        pipes[i].draw();
+    }
+    for(var i = birds.length - 1; i >= 0; i --) {
+        // if(birds[i].dead) continue;
+        birds[i].draw();
+    }
+    pop();
+    fill(255);
+    textAlign(LEFT, TOP);
+    textSize(20);
+    text("Generation " + genNo + "\nPipe " + pipesPassed, 10, 10);
+}
+
+// Draw
+var frames = 0, dead = false, allDead = false;
+function draw() {
+    for(var asdf = 0; asdf < slider.value; asdf += 1) {
+        run();
+        if(birds.length <= live && !dead) {
+            dead = true;
+            
+            bestBirds = [...birds];
+            // for(var bird of birds) {
+            //     bestBirds.push(bird);
+            // }
+            // bestBirds = [...new Set(bestBirds)];
+            // bestBirds.sort((a, b) => b.time - a.time);
+            // bestBirds = bestBirds.slice(0, live);
+        }
+        if(allDead) {
+            var high = best.innerHTML.split(" ");
+            high = high[high.length - 1];
+            if(pipesPassed > high) {
+                best.innerHTML = "Generation " + genNo + " best: " + pipesPassed;
+                data.innerHTML = "<span class='best'>Generation " + genNo + " best: " + pipesPassed + "</span><br>" + data.innerHTML;
+            }
+            else data.innerHTML = "Generation " + genNo + " best: " + pipesPassed + "<br>" + data.innerHTML;
+            if(freeze.value > 0) {
+                display();
+                reset(bestBirds);
+                noLoop();
+                setTimeout(loop, freeze.value);
+                return;
+            }
+            else reset(bestBirds);
+        }
+    }
+    display();
 };
